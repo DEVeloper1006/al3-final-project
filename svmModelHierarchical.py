@@ -3,9 +3,9 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, accuracy_score
 from imblearn.over_sampling import SMOTE
-from collections import Counter
+from sklearn.model_selection import StratifiedKFold
 
 # Define attack types for each level
 level_1_labels = {
@@ -26,7 +26,7 @@ group_mapping = {
     'Reconnaissance': 2
 }
 
-# Selected features (your existing features list)
+# Define selected features for training
 selected_features = [
     ' Flow Duration', 'Total Length of Fwd Packets', ' Total Length of Bwd Packets', 
     ' Fwd Packet Length Max', ' Fwd Packet Length Min', ' Fwd Packet Length Mean', 
@@ -47,6 +47,7 @@ selected_features = [
     'Idle Mean', ' Idle Std', ' Idle Max', ' Idle Min'
 ]
 
+# Function to create hierarchical labels
 def create_hierarchical_labels(data):
     """Create hierarchical labels for each level of classification"""
     
@@ -64,6 +65,7 @@ def create_hierarchical_labels(data):
     
     data['Level_2_Label'] = data[' Label'].apply(get_group_label)
     
+    
     # Level 3: Specific attack type within group
     attack_type_mapping = {}
     for group, attacks in group_labels.items():
@@ -79,157 +81,303 @@ def create_hierarchical_labels(data):
     
     return data
 
-def prepare_data():
+# Prepare data with a holdout set
+def prepare_data_with_holdout():
     print("Loading and preprocessing data...")
-    # Load the data
     file_path = 'traffic_data.parquet'
     data = pd.read_parquet(file_path)
-    
-    # Handle infinities and NaN values
     data.replace([np.inf, -np.inf], np.nan, inplace=True)
     data.dropna(subset=['Flow Bytes/s', ' Flow Packets/s'], inplace=True)
-    
-    # Create hierarchical labels
     data = create_hierarchical_labels(data)
-    
-    # Balance classes (1000 samples per original attack type)
+
     balanced_samples = []
-    max_samples_per_class = 5000
-    
+    max_samples_per_class = 2500
     for label in np.unique(data[' Label']):
         if label != 'BENIGN':
-
             class_data = data[data[' Label'] == label]
             if len(class_data) > max_samples_per_class:
                 class_data = class_data.sample(max_samples_per_class, random_state=42)
             balanced_samples.append(class_data)
         else:
-            
             class_data = data[data[' Label'] == label]
             if len(class_data) > max_samples_per_class:
-                class_data = class_data.sample(42000, random_state=42)
+                class_data = class_data.sample(25000, random_state=42)
             balanced_samples.append(class_data)
-            
-    
     balanced_data = pd.concat(balanced_samples)
-    
-    # Prepare features and labels
+
     X = balanced_data[selected_features]
     y_level_1 = balanced_data['Level_1_Label']
-    
     y_level_2 = balanced_data['Level_2_Label']
-    
     y_level_3 = balanced_data['Level_3_Label']
-    
-    
-    # Train-test split
-    X_train, X_test, y_train_l1, y_test_l1, y_train_l2, y_test_l2, y_train_l3, y_test_l3 = train_test_split(
+
+    X_temp, X_holdout, y_l1_temp, y_l1_holdout, y_l2_temp, y_l2_holdout, y_l3_temp, y_l3_holdout = train_test_split(
         X, y_level_1, y_level_2, y_level_3,
         test_size=0.2, random_state=42, stratify=y_level_1
     )
-    
-    # Scale features
+
+    X_train, X_test, y_train_l1, y_test_l1, y_train_l2, y_test_l2, y_train_l3, y_test_l3 = train_test_split(
+        X_temp, y_l1_temp, y_l2_temp, y_l3_temp,
+        test_size=0.25, random_state=42, stratify=y_l1_temp
+    )
+
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    
-    return (X_train_scaled, X_test_scaled, 
-            y_train_l1, y_test_l1,
-            y_train_l2, y_test_l2,
-            y_train_l3, y_test_l3)
+    X_holdout_scaled = scaler.transform(X_holdout)
 
-svm_level_3_models = {}
-def get_attack_names():
-    """Create mappings between attack names and their group/specific indices"""
-    attack_names_by_group = {}
-    for group_id, (group_name, attacks) in enumerate(group_labels.items()):
-        attack_names_by_group[group_id] = {
-            idx: attack_name 
-            for idx, attack_name in enumerate(attacks)
-        }
-    return attack_names_by_group
+    return (X_train_scaled, X_test_scaled, X_holdout_scaled,
+            y_train_l1, y_test_l1, y_l1_holdout,
+            y_train_l2, y_test_l2, y_l2_holdout,
+            y_train_l3, y_test_l3, y_l3_holdout)
 
-def train_and_evaluate():
-    # Prepare data
-    (X_train_scaled, X_test_scaled,
-     y_train_l1, y_test_l1,
-     y_train_l2, y_test_l2,
-     y_train_l3, y_test_l3) = prepare_data()
-    
-    print("Training Level 1 (BENIGN vs ATTACK)...")
-    # Level 1: Binary classification
-    svm_level_1 = SVC(kernel='rbf', class_weight='balanced', probability=True)
-    svm_level_1.fit(X_train_scaled, y_train_l1)
-    y_pred_l1 = svm_level_1.predict(X_test_scaled)
-    
-    print("Training Level 2 (Attack Groups)...")
-    # Level 2: Attack group classification (only for attack samples)
+# Train models for each level
+def train_and_evaluate(X_train, y_train_l1, y_train_l2, y_train_l3, X_test, y_test_l1, y_test_l2, y_test_l3):
+    # Level 1 model
+    level_1_model = SVC(kernel='rbf', random_state=42, C=2)
+    level_1_model.fit(X_train, y_train_l1)
+    print("\nLevel 1 Evaluation:")
+    print(classification_report(y_test_l1, level_1_model.predict(X_test), zero_division=0))
+
+    # Level 2 model (on ATTACK samples)
     attack_mask_train = y_train_l1 == 1
     attack_mask_test = y_test_l1 == 1
-    
-    X_train_attack = X_train_scaled[attack_mask_train]
-    y_train_l2_attack = y_train_l2[attack_mask_train]
-    
-    svm_level_2 = SVC(kernel='rbf', class_weight='balanced', probability=True)
-    svm_level_2.fit(X_train_attack, y_train_l2_attack)
-    
-    # For evaluation, we'll use the true attack samples
-    X_test_attack = X_test_scaled[attack_mask_test]
-    y_test_l2_attack = y_test_l2[attack_mask_test]
-    y_pred_l2_attack = svm_level_2.predict(X_test_attack)
-    
-    print("Training Level 3 (Specific Attacks)...")
-    # Get attack names mapping
-    attack_names_by_group = get_attack_names()
-    
-    # Level 3: Specific attack classification (separate model for each group)
-    for group_id in range(3):  # 3 attack groups
-        group_name = [name for name, id in group_mapping.items() if id == group_id][0]
-        print(f"\nTraining and evaluating attacks in group: {group_name}")
-        
-        # Train data for this group
+    level_2_model = SVC(kernel='linear', random_state=42, C=0.5)
+    level_2_model.fit(X_train[attack_mask_train & (y_train_l2 != -1)], y_train_l2[attack_mask_train & (y_train_l2 != -1)])
+    print("\nLevel 2 Evaluation:")
+    print(classification_report(y_test_l2[attack_mask_test & (y_test_l2 != -1)], level_2_model.predict(X_test[attack_mask_test & (y_test_l2 != -1)]), zero_division=0))
+
+    # Level 3 models for each group
+    level_3_models = {}
+    for group_id in range(3):
         group_mask_train = (y_train_l2 == group_id) & attack_mask_train
-        X_train_group = X_train_scaled[group_mask_train]
-        y_train_l3_group = y_train_l3[group_mask_train]
-        
-        print(f"Group Id {group_id}, Distribution : {Counter(y_train_l3_group)}")
-        if len(X_train_group) > 0:
-            svm_level_3 = SVC(kernel='rbf', class_weight='balanced', probability=True)
-            svm_level_3.fit(X_train_group, y_train_l3_group)
-            svm_level_3_models[group_id] = svm_level_3
-            
-            # Test data for this group
-            group_mask_test = (y_test_l2 == group_id) & attack_mask_test
-            X_test_group = X_test_scaled[group_mask_test]
-            y_test_l3_group = y_test_l3[group_mask_test]
-            
-            if len(X_test_group) > 0:
-                y_pred_l3_group = svm_level_3.predict(X_test_group)
-                
-                # Create attack name mappings for the classification report
-                attack_names = attack_names_by_group[group_id]
-                target_names = [attack_names[i] for i in sorted(set(y_test_l3_group))]
-                
-                print(f"\nClassification Report for {group_name} attacks:")
-                print(classification_report(
-                    y_test_l3_group, 
-                    y_pred_l3_group,
-                    target_names=target_names
-                ))
-                
-                
-            else:
-                print(f"No test samples for group {group_name}")
+        group_mask_test = (y_test_l2 == group_id) & attack_mask_test
+        if np.any(group_mask_train):
+            # Apply SMOTE to balance the training data for this group
+            smote = SMOTE(random_state=42)
+            X_group_train = X_train[group_mask_train & (y_train_l3 != -1)]
+            y_group_train = y_train_l3[group_mask_train & (y_train_l3 != -1)]
+            X_group_train_smote, y_group_train_smote = smote.fit_resample(X_group_train, y_group_train)
+
+            group_model = SVC(kernel='linear', random_state=42, C=0.01)
+            group_model.fit(X_group_train_smote, y_group_train_smote)
+            level_3_models[group_id] = group_model
+
+            if np.any(group_mask_test):
+                print(f"\nLevel 3 Evaluation for Group {group_id}:")
+                print(classification_report(y_test_l3[group_mask_test & (y_test_l3 != -1)], group_model.predict(X_test[group_mask_test & (y_test_l3 != -1)]), zero_division=0))
         else:
-            print(f"No training samples for group {group_name}")
+            level_3_models[group_id] = None
+
+    return level_1_model, level_2_model, level_3_models
+
+# Predict on the holdout set
+def predict_pipeline(models, X_holdout_scaled):
+    level_1_model, level_2_model, level_3_models = models
+    pred_l1 = level_1_model.predict(X_holdout_scaled)
+    attack_mask = pred_l1 == 1
+    pred_l2 = np.full(pred_l1.shape, -1)
+    if np.any(attack_mask):
+        pred_l2[attack_mask] = level_2_model.predict(X_holdout_scaled[attack_mask])
+    pred_l3 = np.full(pred_l1.shape, -1)
+    for group_id, group_model in level_3_models.items():
+        if group_model is not None:
+            group_mask = (pred_l2 == group_id) & attack_mask
+            if np.any(group_mask):
+                pred_l3[group_mask] = group_model.predict(X_holdout_scaled[group_mask])
+    return pred_l1, pred_l2, pred_l3
+
+def evaluate_holdout(models, X_holdout_scaled, y_l1_holdout, y_l2_holdout, y_l3_holdout):
+    pred_l1, pred_l2, pred_l3 = predict_pipeline(models, X_holdout_scaled)
     
-    # Print overall reports
-    print("\nLevel 1 Classification Report:")
-    print(classification_report(y_test_l1, y_pred_l1))
+    level_2_names = {
+        0: 'DoS/DDoS',
+        1: 'Brute Force',
+        2: 'Reconnaissance'
+    }
     
-    print("\nLevel 2 Classification Report (Attack samples only):")
-    group_names = [name for name, _ in group_mapping.items()]
-    print(classification_report(y_test_l2_attack, y_pred_l2_attack, target_names=group_names))
+    level_3_names = {
+        0: {  # DoS/DDoS attacks
+            0: 'DoS GoldenEye',
+            1: 'DoS Hulk',
+            2: 'DoS Slowhttptest',
+            3: 'DoS slowloris',
+            4: 'DDoS'
+        },
+        1: {  # Brute Force attacks
+            0: 'FTP-Patator',
+            1: 'SSH-Patator',
+            2: 'Heartbleed',
+            3: 'Bot'
+        },
+        2: {  # Reconnaissance attacks
+            0: 'PortScan',
+            1: 'Infiltration'
+        }
+    }
+    
+    print("\nHoldout Evaluation - Level 1:")
+    print(classification_report(y_l1_holdout, pred_l1, 
+                              target_names=['BENIGN', 'ATTACK'],
+                              zero_division=0))
+    
+    print("\nHoldout Evaluation - Level 2:")
+    attack_mask = y_l1_holdout == 1
+    valid_l2_mask = (y_l2_holdout != -1) & attack_mask
+    print(classification_report(y_l2_holdout[valid_l2_mask], 
+                              pred_l2[valid_l2_mask], 
+                              target_names=[level_2_names[i] for i in range(3)],
+                              zero_division=0,
+                              labels=[0, 1, 2]))
+    
+    print("\nHoldout Evaluation - Level 3:")
+    for group_id in range(3):
+        group_mask = (y_l2_holdout == group_id) & attack_mask
+        valid_l3_mask = (y_l3_holdout != -1) & group_mask
+        if np.sum(valid_l3_mask) > 0:
+            valid_labels = sorted(list(set(y_l3_holdout[valid_l3_mask])))
+            print(f"\nGroup: {level_2_names[group_id]}")
+            print(classification_report(y_l3_holdout[valid_l3_mask], 
+                                     pred_l3[valid_l3_mask], 
+                                     target_names=[level_3_names[group_id][i] for i in valid_labels],
+                                     zero_division=0,
+                                     labels=valid_labels))
+
+def prepare_data_for_cv():
+    print("Loading and preprocessing data...")
+    file_path = 'traffic_data.parquet'
+    data = pd.read_parquet(file_path)
+    data.replace([np.inf, -np.inf], np.nan, inplace=True)
+    data.dropna(subset=['Flow Bytes/s', ' Flow Packets/s'], inplace=True)
+    data = create_hierarchical_labels(data)
+
+    # Balance the dataset
+    balanced_samples = []
+    max_samples_per_class = 2500
+    for label in np.unique(data[' Label']):
+        class_data = data[data[' Label'] == label]
+        if label != 'BENIGN':
+            if len(class_data) > max_samples_per_class:
+                class_data = class_data.sample(max_samples_per_class, random_state=42)
+        else:
+            if len(class_data) > max_samples_per_class:
+                class_data = class_data.sample(25000, random_state=42)
+        balanced_samples.append(class_data)
+    
+    balanced_data = pd.concat(balanced_samples)
+    
+    X = balanced_data[selected_features]
+    y_level_1 = balanced_data['Level_1_Label']
+    y_level_2 = balanced_data['Level_2_Label']
+    y_level_3 = balanced_data['Level_3_Label']
+    
+    return X, y_level_1, y_level_2, y_level_3
+
+def cross_validate_hierarchical(X, y_level_1, y_level_2, y_level_3, n_splits=5):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    # Store metrics for each fold
+    metrics = {
+        'level_1': [],
+        'level_2': [],
+        'level_3': {0: [], 1: [], 2: []}
+    }
+    
+    for fold, (train_idx, test_idx) in enumerate(skf.split(X, y_level_1)):
+        print(f"\nFold {fold + 1}/{n_splits}")
+        
+        # Split data
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train_l1, y_test_l1 = y_level_1.iloc[train_idx], y_level_1.iloc[test_idx]
+        y_train_l2, y_test_l2 = y_level_2.iloc[train_idx], y_level_2.iloc[test_idx]
+        y_train_l3, y_test_l3 = y_level_3.iloc[train_idx], y_level_3.iloc[test_idx]
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Level 1: Binary classification
+        level_1_model = SVC(kernel='rbf', random_state=42, C=1)
+        level_1_model.fit(X_train_scaled, y_train_l1)
+        l1_preds = level_1_model.predict(X_test_scaled)
+        l1_report = classification_report(y_test_l1, l1_preds, output_dict=True)
+        metrics['level_1'].append(l1_report)
+        
+        # Level 2: Attack group classification
+        attack_mask_train = y_train_l1 == 1
+        attack_mask_test = y_test_l1 == 1
+        
+        level_2_model = SVC(kernel='linear', random_state=42, C=0.5)
+        valid_l2_mask_train = attack_mask_train & (y_train_l2 != -1)
+        valid_l2_mask_test = attack_mask_test & (y_test_l2 != -1)
+        
+        if np.any(valid_l2_mask_train):
+            level_2_model.fit(X_train_scaled[valid_l2_mask_train], 
+                            y_train_l2[valid_l2_mask_train])
+            l2_preds = level_2_model.predict(X_test_scaled[valid_l2_mask_test])
+            l2_report = classification_report(y_test_l2[valid_l2_mask_test], 
+                                           l2_preds, output_dict=True)
+            metrics['level_2'].append(l2_report)
+        
+        # Level 3: Specific attack classification
+        for group_id in range(3):
+            group_mask_train = (y_train_l2 == group_id) & attack_mask_train
+            group_mask_test = (y_test_l2 == group_id) & attack_mask_test
+            
+            if np.any(group_mask_train):
+                X_group_train = X_train_scaled[group_mask_train & (y_train_l3 != -1)]
+                y_group_train = y_train_l3[group_mask_train & (y_train_l3 != -1)]
+                
+                # Apply SMOTE
+                smote = SMOTE(random_state=42)
+                X_group_train_smote, y_group_train_smote = smote.fit_resample(
+                    X_group_train, y_group_train)
+                
+                group_model = SVC(kernel='linear', random_state=42, C=0.01)
+                group_model.fit(X_group_train_smote, y_group_train_smote)
+                
+                valid_l3_mask_test = group_mask_test & (y_test_l3 != -1)
+                if np.any(valid_l3_mask_test):
+                    l3_preds = group_model.predict(X_test_scaled[valid_l3_mask_test])
+                    l3_report = classification_report(y_test_l3[valid_l3_mask_test], 
+                                                   l3_preds, output_dict=True)
+                    metrics['level_3'][group_id].append(l3_report)
+    
+    return metrics
+
+def print_cv_results(metrics):
+    # Level 1 results
+    l1_accuracy = np.mean([m['accuracy'] for m in metrics['level_1']])
+    l1_std = np.std([m['accuracy'] for m in metrics['level_1']])
+    print(f"\nLevel 1 CV Results:")
+    print(f"Average Accuracy: {l1_accuracy:.3f} ± {l1_std:.3f}")
+    
+    # Level 2 results
+    if metrics['level_2']:
+        l2_accuracy = np.mean([m['accuracy'] for m in metrics['level_2']])
+        l2_std = np.std([m['accuracy'] for m in metrics['level_2']])
+        print(f"\nLevel 2 CV Results:")
+        print(f"Average Accuracy: {l2_accuracy:.3f} ± {l2_std:.3f}")
+    
+    # Level 3 results
+    print("\nLevel 3 CV Results by Group:")
+    for group_id in range(3):
+        if metrics['level_3'][group_id]:
+            l3_accuracy = np.mean([m['accuracy'] for m in metrics['level_3'][group_id]])
+            l3_std = np.std([m['accuracy'] for m in metrics['level_3'][group_id]])
+            print(f"Group {group_id} Average Accuracy: {l3_accuracy:.3f} ± {l3_std:.3f}")
 
 if __name__ == "__main__":
-    train_and_evaluate()
+    X, y_level_1, y_level_2, y_level_3 = prepare_data_for_cv()
+    metrics = cross_validate_hierarchical(X, y_level_1, y_level_2, y_level_3)
+    print_cv_results(metrics)
+    (X_train_scaled, X_test_scaled, X_holdout_scaled,
+     y_train_l1, y_test_l1, y_l1_holdout,
+     y_train_l2, y_test_l2, y_l2_holdout,
+     y_train_l3, y_test_l3, y_l3_holdout) = prepare_data_with_holdout()
+
+    models = train_and_evaluate(X_train_scaled, y_train_l1, y_train_l2, y_train_l3,
+                                X_test_scaled, y_test_l1, y_test_l2, y_test_l3)
+
+    print("\nEvaluating on holdout set...")
+    evaluate_holdout(models, X_holdout_scaled, y_l1_holdout, y_l2_holdout, y_l3_holdout)
