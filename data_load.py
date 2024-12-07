@@ -6,8 +6,9 @@ from sklearn.preprocessing import StandardScaler
 def load_parquet(file_path):
     try:
         df = pd.read_parquet(file_path)
-    except:
-        print("File path not correct")
+    except Exception as e:  # Catch specific exceptions if needed
+        print(f"Error loading parquet file: {e}")
+        return None  # Return None to indicate failure
     return df
 
 def replace_inf(df):
@@ -38,10 +39,14 @@ def split_scale(df,target_col_name,feature_col_name):
     X_test = scaler.fit_transform(X_test)
     return X_train, X_test, Y_train, Y_test
 
-def get_data(file_path):
-    df = replace_inf(load_parquet(file_path))
-    df, mapping = map_labels(df,' Label')
-    X_train, X_test, Y_train, Y_test = split_scale(df,' Label',[' Flow Duration', 'Total Length of Fwd Packets', ' Total Length of Bwd Packets', ' Fwd Packet Length Max', ' Fwd Packet Length Min', ' Fwd Packet Length Mean', ' Fwd Packet Length Std', 'Bwd Packet Length Max', ' Bwd Packet Length Min', ' Bwd Packet Length Mean', ' Bwd Packet Length Std', 'Flow Bytes/s', ' Flow Packets/s', ' Flow IAT Mean', ' Flow IAT Std', ' Flow IAT Max', ' Flow IAT Min', 'Fwd IAT Total', ' Fwd IAT Mean', ' Fwd IAT Std', ' Fwd IAT Max', ' Fwd IAT Min', 'Bwd IAT Total', ' Bwd IAT Mean', ' Bwd IAT Std', ' Bwd IAT Max', ' Bwd IAT Min', 'Fwd PSH Flags', ' Fwd URG Flags', ' Fwd Header Length', ' Bwd Header Length', 'Fwd Packets/s', ' Bwd Packets/s', ' Min Packet Length', ' Max Packet Length', ' Packet Length Mean', ' Packet Length Std', ' Packet Length Variance', 'FIN Flag Count', ' SYN Flag Count', ' RST Flag Count', ' PSH Flag Count', ' ACK Flag Count', ' URG Flag Count', ' CWE Flag Count', ' ECE Flag Count', ' Down/Up Ratio', ' Average Packet Size', ' Avg Fwd Segment Size', ' Avg Bwd Segment Size', ' Fwd Header Length.1', 'Subflow Fwd Packets', ' Subflow Fwd Bytes', ' Subflow Bwd Packets', ' Subflow Bwd Bytes', 'Init_Win_bytes_forward', ' Init_Win_bytes_backward', ' act_data_pkt_fwd', ' min_seg_size_forward', 'Active Mean', ' Active Std', ' Active Max', ' Active Min', 'Idle Mean', ' Idle Std', ' Idle Max', ' Idle Min'])
-    return X_train, X_test, Y_train, Y_test
+def get_data(file_path, target_col_name, feature_col_name):
+    df = load_parquet(file_path)
+    if df is None:
+        raise ValueError("Failed to load parquet file. Please check the file path or content.")
+    
+    df = replace_inf(df)
+    df, mapping = map_labels(df, target_col_name)
+    X_train, X_test, Y_train, Y_test = split_scale(df, target_col_name, feature_col_name)
+    return X_train, X_test, Y_train, Y_test, mapping
 
 # X_train, X_test, Y_train, Y_test = get_data('traffic_data.parquet')
